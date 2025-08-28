@@ -31,15 +31,34 @@ export default function TemplateEditor({
   const PLACE_TAG = 'span';
   const HBS_ATTR = 'data-hbs';
 
-  // turn {{#each x}} / {{#if x}} and inline tokens into HTML placeholders
-  const hbsToHtml = (hbs: string) =>
-    hbs
-      // block helpers first
-      .replace(/{{#each\s+([^}]+)}}/g, `<${PLACE_TAG} ${HBS_ATTR}="{{#each $1}}" class="hbs-block-open">{{#each $1}}</${PLACE_TAG}>`)
-      .replace(/{{#if\s+([^}]+)}}/g, `<${PLACE_TAG} ${HBS_ATTR}="{{#if $1}}" class="hbs-block-open">{{#if $1}}</${PLACE_TAG}>`)
-      .replace(/{{\/(each|if)}}/g, `<${PLACE_TAG} ${HBS_ATTR}="{{/$1}}" class="hbs-block-close">{{/$1}}</${PLACE_TAG}>`)
-      // inline
-      .replace(/{{[^}]+}}/g, (m) => `<${PLACE_TAG} ${HBS_ATTR}="${m}" class="hbs-token">${m}</${PLACE_TAG}>`);
+  const hbsToHtml = (hbs: string, sampleData: any) => {
+    // helper: render handlebars safely
+    const render = (tpl: string) => {
+      try {
+        const compiled = Handlebars.compile(tpl);
+        return compiled(sampleData);
+      } catch {
+        return tpl; // fallback raw
+      }
+    };
+
+    return hbs
+      // block helpers first (don’t render block body here)
+      .replace(/{{#each\s+([^}]+)}}/g, (_, expr) =>
+        `<${PLACE_TAG} ${HBS_ATTR}="{{#each ${expr}}}" class="hbs-block-open">{{#each ${expr}}}</${PLACE_TAG}>`
+      )
+      .replace(/{{#if\s+([^}]+)}}/g, (_, expr) =>
+        `<${PLACE_TAG} ${HBS_ATTR}="{{#if ${expr}}}" class="hbs-block-open">{{#if ${expr}}}</${PLACE_TAG}>`
+      )
+      .replace(/{{\/(each|if)}}/g, (_, kw) =>
+        `<${PLACE_TAG} ${HBS_ATTR}="{{/${kw}}}" class="hbs-block-close">{{/${kw}}}</${PLACE_TAG}>`
+      )
+      // inline tokens
+      .replace(/{{[^}]+}}/g, (m) => {
+        const resolved = render(m);
+        return `<${PLACE_TAG} ${HBS_ATTR}="${m}" class="hbs-token">${resolved}</${PLACE_TAG}>`;
+      });
+  };
 
   // turn <span data-hbs="…"> back into raw {{…}}
   const htmlToHbs = (html: string) => {
@@ -68,7 +87,7 @@ export default function TemplateEditor({
   };
 
   // --- Utils for modal (type/preview/path) ---
-  const typeOf = (v: any): 'null'|'array'|'object'|'string'|'number'|'boolean'|'undefined' => {
+  const typeOf = (v: any): 'null' | 'array' | 'object' | 'string' | 'number' | 'boolean' | 'undefined' => {
     if (v === null) return 'null';
     if (Array.isArray(v)) return 'array';
     const t = typeof v;
@@ -129,17 +148,17 @@ export default function TemplateEditor({
     return `
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:8px">
         ${entries
-          .map((e) => {
-            const badge = e.kind === 'object' ? 'Object' : e.kind === 'array' ? 'Array' : 'Value';
-            return `
+        .map((e) => {
+          const badge = e.kind === 'object' ? 'Object' : e.kind === 'array' ? 'Array' : 'Value';
+          return `
               <div class="gjs-card" data-path="${escapeHtml(e.path)}" data-kind="${e.kind}" style="border:1px solid #e5e7eb;border-radius:10px;padding:10px;cursor:pointer;background:#fff">
                 <div style="font-weight:600;margin-bottom:6px;word-break:break-all">${escapeHtml(e.label)}
                   <span style="float:right;font-size:12px;color:#2563eb">${badge}</span>
                 </div>
                 <div style="font-size:12px;color:#374151;word-break:break-word;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(previewStr(e.value))}</div>
               </div>`;
-          })
-          .join('')}
+        })
+        .join('')}
       </div>
     `;
   };
@@ -312,6 +331,20 @@ export default function TemplateEditor({
     }, 50);
   };
 
+  const setComponentText = (comp: any, text: string) => {
+    const children = comp.components?.();
+    if (children && children.length) {
+      // if a single textnode exists, update it
+      const first = children.at(0);
+      if (first && first.is && first.is('textnode')) {
+        first.set('content', text);
+        return;
+      }
+    }
+    // otherwise reset to a single text node
+    comp.components().reset([{ type: 'textnode', content: text }]);
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -328,7 +361,7 @@ export default function TemplateEditor({
     setEditorReady(true);
 
     // Load initial HBS
-    const initialHtml = hbsToHtml(initialHbs);
+    const initialHtml = hbsToHtml(initialHbs, sampleData);
     editor.setComponents(initialHtml);
 
     // Component type for our token placeholder (locks accidental edits)
@@ -355,6 +388,27 @@ export default function TemplateEditor({
         el.tagName === PLACE_TAG.toUpperCase() && el.hasAttribute(HBS_ATTR),
       model: { type: 'hbs-token' },
     });
+
+    editor.BlockManager.add("section", {
+      label: "Section",
+      category: "Basic",
+      attributes: { class: "fa fa-square" },
+      content: {
+        type: "section",
+        components: [
+          {
+            type: "text",
+            content: "Section content here...",
+          },
+        ],
+        style: {
+          padding: "20px",
+          border: "1px dashed #aaa",
+          margin: "10px 0",
+        },
+      },
+    });
+
 
     // --- Blocks: Variable / If / Each ---
     editor.BlockManager.add('hbs-var', {
@@ -384,13 +438,25 @@ export default function TemplateEditor({
     // Utility to set hbs attribute and visible inner text on the component element
     const setTokenBinding = (component: any, path: string, previewValue: any) => {
       const hbsExpr = `{{${path}}}`;
-      component.addAttributes({ [HBS_ATTR]: hbsExpr, 'data-hbs-processed': '1', 'data-source': path.split('.')[0] });
+      component.addAttributes({
+        [HBS_ATTR]: hbsExpr,
+        'data-hbs-processed': '1',
+        'data-source': path.split('.')[0],
+      });
+
+      // Update the model content so GrapesJS View Code shows the preview text,
+      // not the original `{{}}` placeholder.
+      const textToShow = (previewValue !== undefined && previewValue !== null) ? String(previewValue) : hbsExpr;
+      setComponentText(component, textToShow);
+
+      // (Optional) also update the live element for immediate visual feedback
       const el = component.getEl?.();
       if (el) {
         el.setAttribute(HBS_ATTR, hbsExpr);
-        el.innerText = (previewValue !== undefined && previewValue !== null) ? String(previewValue) : hbsExpr;
+        el.textContent = textToShow;
       }
     };
+
 
     const setBlockBinding = (component: any, kind: 'if' | 'each', path: string, extra?: { range?: { from?: number; to?: number } }) => {
       if (kind === 'if') {
@@ -424,7 +490,7 @@ export default function TemplateEditor({
               child.addAttributes({ 'data-hbs-processed': '1' });
             }
           });
-        } catch {}
+        } catch { }
       }
     };
 
@@ -495,7 +561,7 @@ export default function TemplateEditor({
         if (raw.startsWith('{{#if')) return openIfModal(component);
         if (raw.startsWith('{{#each')) return openEachModal(component);
         return openVariableModal(component);
-      } catch {}
+      } catch { }
     });
 
     return () => editor.destroy();
